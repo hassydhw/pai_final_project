@@ -2,13 +2,16 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Quest 3 VR Teleop Controller</title>
     <style>
         body { font-family: sans-serif; text-align: center; background: #111827; color: #fff; margin: 0; overflow: hidden; }
         #info { position: absolute; top: 20px; width: 100%; text-align: center; z-index: 100; }
-        input { font-size: 18px; width: 320px; padding: 10px; text-align: center; border-radius: 8px; border: none; }
         button { font-size: 20px; padding: 12px 24px; margin-top: 15px; border-radius: 8px; cursor: pointer; background: #0284c7; color: white; border: none; }
+        button:disabled { background: #475569; cursor: not-allowed; }
         #status { font-size: 18px; color: #38bdf8; margin-top: 15px; font-weight: bold; }
+        #wsUrl { font-size: 14px; color: #94a3b8; margin-top: 6px; }
+        #help { font-size: 15px; color: #cbd5e1; margin-top: 20px; line-height: 1.7; }
     </style>
     <!-- Three.js (3Dグラフィックライブラリ) の読み込み -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -16,19 +19,28 @@
 <body>
     <div id="info">
         <h1>Quest 3 VR Teleop</h1>
-        <p>WebSocketのトンネルURLを入力してください</p>
-        <input type="text" id="ipInput" placeholder="例: pretty-dog-12.loca.lt">
-        <br>
-        <button id="startBtn">VR開始 & 通信スタート</button>
-        <div id="status">未接続</div>
+        <div id="status">サーバーに接続中...</div>
+        <div id="wsUrl"></div>
+        <button id="startBtn" disabled>VR開始</button>
+        <div id="help">
+            右手コントローラの位置 → アーム先端<br>
+            グリップボタン → グリッパー開閉（押し込むと閉じる）<br>
+            A ボタン → 原点リセット（今の手の位置を基準に取り直す）
+        </div>
     </div>
 
     <script>
+        // 配信元と同じホストの /ws に接続する（https なら wss、http なら ws）
+        const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+        const RECONNECT_MS = 2000;
+
         let ws = null;
-        let scene, camera, renderer, controllerRight;
+        let scene, camera, renderer, controllerRight = null, controllerMat;
+        let prevAPressed = false;
 
         const startBtn = document.getElementById('startBtn');
         const statusDiv = document.getElementById('status');
+        document.getElementById('wsUrl').innerText = WS_URL;
 
         // Three.js 3D視覚空間の初期化
         function initThree() {
@@ -45,83 +57,104 @@
             light.position.set(0, 1, 0);
             scene.add(light);
 
-            // 右手コントローラの視覚化マーカー（赤い球体）
-            const sphereGeo = new THREE.SphereGeometry(0.03, 16, 16);
-            const sphereMat = new THREE.MeshStandardMaterial({ color: 0xef4444 });
-            const controllerMesh = new THREE.Mesh(sphereGeo, sphereMat);
-
             renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.xr.enabled = true; // WebXR（VR機能）を有効化
             document.body.appendChild(renderer.domElement);
 
-            // コントローラオブジェクトのセットアップ
-            controllerRight = renderer.xr.getController(0); // 右手
-            controllerRight.add(controllerMesh);
-            scene.add(controllerRight);
+            // コントローラの視覚化マーカー（球体。グリップ量で赤→緑に変化）
+            // getController(0) が右手とは限らないため、handedness で右手を判定する
+            for (let i = 0; i < 2; i++) {
+                const controller = renderer.xr.getController(i);
+                controller.addEventListener('connected', (e) => {
+                    if (e.data.handedness === 'right') {
+                        controllerRight = controller;
+                        controllerMat = new THREE.MeshStandardMaterial({ color: 0xef4444 });
+                        controller.add(new THREE.Mesh(new THREE.SphereGeometry(0.03, 16, 16), controllerMat));
+                    }
+                });
+                controller.addEventListener('disconnected', () => {
+                    if (controllerRight === controller) {
+                        controllerRight = null;
+                        controller.clear();
+                    }
+                });
+                scene.add(controller);
+            }
+        }
+
+        // WebSocket 接続（切断時は自動で再接続）
+        function connect() {
+            statusDiv.innerText = 'サーバーに接続中...';
+            ws = new WebSocket(WS_URL);
+
+            ws.onopen = () => {
+                statusDiv.innerText = '✅ 接続済み — VR開始を押してください';
+                startBtn.disabled = false;
+            };
+            ws.onclose = () => {
+                statusDiv.innerText = `切断されました。${RECONNECT_MS / 1000}秒後に再接続します...`;
+                setTimeout(connect, RECONNECT_MS);
+            };
+            ws.onerror = () => { ws.close(); };
+        }
+
+        // 右手の gamepad から入力を読む（xr-standard: buttons[1]=grip, buttons[4]=A）
+        function readRightGamepad(session) {
+            for (const source of session.inputSources) {
+                if (source.handedness === 'right' && source.gamepad) {
+                    const b = source.gamepad.buttons;
+                    return {
+                        grip: b[1] ? b[1].value : 0,
+                        aPressed: b[4] ? b[4].pressed : false
+                    };
+                }
+            }
+            return { grip: 0, aPressed: false };
         }
 
         initThree();
+        connect();
 
+        // requestSession はユーザー操作（クリック）から呼ぶ必要がある
         startBtn.addEventListener('click', async () => {
-            let inputVal = document.getElementById('ipInput').value.trim();
-            if (!inputVal) {
-                statusDiv.innerText = "URLを入力してください。";
-                return;
-            }
-
-            inputVal = inputVal.replace(/^https?:\/\//, '').replace(/^wss?:\/\//, '');
-            const wsUrl = inputVal.includes('loca.lt') ? `wss://${inputVal}` : `ws://${inputVal}:8765`;
-
-            statusDiv.innerText = `接続中... (${wsUrl})`;
-
-            ws = new WebSocket(wsUrl);
-
-            ws.onopen = async () => {
-                statusDiv.innerText = "WebSocket 接続成功！VRを開始します...";
+            try {
+                const session = await navigator.xr.requestSession('immersive-vr', {
+                    optionalFeatures: ['local-floor', 'bounded-floor']
+                });
+                await renderer.xr.setSession(session);
                 document.getElementById('info').style.display = 'none';
 
-                try {
-                    const session = await navigator.xr.requestSession('immersive-vr', {
-                        optionalFeatures: ['local-floor', 'bounded-floor']
-                    });
-                    await renderer.xr.setSession(session);
+                session.addEventListener('end', () => {
+                    renderer.setAnimationLoop(null);
+                    document.getElementById('info').style.display = '';
+                });
 
-                    // VR描画 & リアルタイムデータ送信ループ
-                    renderer.setAnimationLoop(() => {
-                        renderer.render(scene, camera);
+                // VR描画 & リアルタイムデータ送信ループ
+                renderer.setAnimationLoop(() => {
+                    renderer.render(scene, camera);
 
-                        if (ws && ws.readyState === WebSocket.OPEN && controllerRight) {
-                            const pos = controllerRight.position;
-                            
-                            // グリップボタンの押し込み度合いを取得
-                            let gripVal = 0;
-                            const sources = session.inputSources;
-                            for (let source of sources) {
-                                if (source.handedness === 'right' && source.gamepad) {
-                                    if (source.gamepad.buttons && source.gamepad.buttons[1]) {
-                                        gripVal = source.gamepad.buttons[1].value;
-                                    }
-                                }
-                            }
+                    if (!controllerRight || !ws || ws.readyState !== WebSocket.OPEN) return;
 
-                            const payload = {
-                                x: parseFloat(pos.x.toFixed(3)),
-                                y: parseFloat(pos.y.toFixed(3)),
-                                z: parseFloat(pos.z.toFixed(3)),
-                                gripper: parseFloat(gripVal.toFixed(2))
-                            };
-                            ws.send(JSON.stringify(payload));
-                        }
-                    });
+                    const pos = controllerRight.position;
+                    const { grip, aPressed } = readRightGamepad(session);
+                    controllerMat.color.setRGB(0.94 * (1 - grip), 0.27 + 0.6 * grip, 0.27);
 
-                } catch (err) {
-                    alert("VRセッション開始失敗: " + err.message);
-                }
-            };
+                    const payload = {
+                        x: parseFloat(pos.x.toFixed(3)),
+                        y: parseFloat(pos.y.toFixed(3)),
+                        z: parseFloat(pos.z.toFixed(3)),
+                        gripper: parseFloat(grip.toFixed(2))
+                    };
+                    // A ボタンを押した瞬間だけ原点リセットを要求
+                    if (aPressed && !prevAPressed) payload.reset = true;
+                    prevAPressed = aPressed;
 
-            ws.onerror = () => { statusDiv.innerText = "接続エラー。URLを確認してください。"; };
-            ws.onclose = () => { statusDiv.innerText = "切断されました。"; };
+                    ws.send(JSON.stringify(payload));
+                });
+            } catch (err) {
+                statusDiv.innerText = 'VRセッション開始失敗: ' + err.message;
+            }
         });
     </script>
 </body>

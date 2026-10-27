@@ -1,0 +1,4 @@
+mujoco>=3.0
+numpy
+aiohttp>=3.9
+websockets  # send_test.py / 旧 teleop_mujoco.py 用
