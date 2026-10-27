@@ -1,0 +1,5 @@
+# WSL (Linux) で実行するため改行は LF に統一（CRLF だと .sh が動かない）
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.stl binary
