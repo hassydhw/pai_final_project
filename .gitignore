@@ -1,0 +1,48 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 仮想環境（本プロジェクトは ~/pai_env を使用するが、念のため）
+.venv/
+venv/
+env/
+pai_env/
+
+# ===== Node / LocalTunnel =====
+node_modules/
+npm-debug.log*
+
+# ===== ログ・実行時ファイル =====
+logs/
+*.log
+*.pid
+
+# ===== テレオペ記録データ（将来の LeRobot 用データ収集） =====
+data/
+recordings/
+*.hdf5
+*.h5
+*.zarr/
+
+# ===== MuJoCo 出力 =====
+MUJOCO_LOG.TXT
+*.mjb
+
+# ===== 秘密情報 =====
+.env
+.env.*
+
+# ===== OS / エディタ =====
+# Windows からコピーした際に付く代替データストリーム
+*:Zone.Identifier
+*Zone.Identifier
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+*.swp
