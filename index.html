@@ -23,6 +23,7 @@
         <div id="wsUrl"></div>
         <button id="startBtn" disabled>VR開始</button>
         <div id="help">
+            VR 内にアームとブロックを表示（右手の位置にグリッパーが来る）<br>
             右手コントローラの位置 → アーム先端<br>
             グリップボタン → グリッパー開閉（押し込むと閉じる）<br>
             A ボタン → 原点リセット（今の手の位置を基準に取り直す）<br>
@@ -38,6 +39,9 @@
         let ws = null;
         let scene, camera, renderer, controllerRight = null, controllerMat;
         let prevAPressed = false, prevBPressed = false;
+
+        // サーバーから受け取ったシミュレーションの表示（ロボット座標の geom をそのまま子に持つ）
+        let robotRoot = null, geomRoot = null, geomObjects = [], successMaterial = null, successBaseColor = null, successColor = null;
 
         const startBtn = document.getElementById('startBtn');
         const statusDiv = document.getElementById('status');
@@ -57,10 +61,30 @@
             const light = new THREE.HemisphereLight(0xffffff, 0x444444, 1);
             light.position.set(0, 1, 0);
             scene.add(light);
+            // ロボット座標（x=前, y=左, z=上）→ WebXR 座標（x=右, y=上, z=手前）への回転。
+            // 位置（anchor）と縮尺はサーバーから受け取る
+            robotRoot = new THREE.Group();
+            robotRoot.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(
+                new THREE.Vector3(0, 0, -1), new THREE.Vector3(-1, 0, 0), new THREE.Vector3(0, 1, 0)));
+            robotRoot.visible = false;
+            scene.add(robotRoot);
+            geomRoot = new THREE.Group();
+            robotRoot.add(geomRoot);
+
+            // 影を落とすライト（ロボット座標で真上やや手前から。アームと一緒に動く）
+            const sun = new THREE.DirectionalLight(0xffffff, 0.6);
+            sun.position.set(0.05, 0.05, 1.0);
+            sun.target.position.set(0.15, 0, 0);
+            sun.castShadow = true;
+            sun.shadow.mapSize.set(1024, 1024);
+            Object.assign(sun.shadow.camera, { left: -0.6, right: 0.6, top: 0.6, bottom: -0.6, near: 0.5, far: 4 });
+            sun.shadow.bias = -0.0005;
+            robotRoot.add(sun, sun.target);
 
             renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.xr.enabled = true; // WebXR（VR機能）を有効化
+            renderer.shadowMap.enabled = true;
             document.body.appendChild(renderer.domElement);
 
             // コントローラの視覚化マーカー（球体。グリップ量で赤→緑に変化）
@@ -70,8 +94,9 @@
                 controller.addEventListener('connected', (e) => {
                     if (e.data.handedness === 'right') {
                         controllerRight = controller;
-                        controllerMat = new THREE.MeshStandardMaterial({ color: 0xef4444 });
-                        controller.add(new THREE.Mesh(new THREE.SphereGeometry(0.03, 16, 16), controllerMat));
+                        // グリッパーと重なるので小さめ・半透明にする
+                        controllerMat = new THREE.MeshStandardMaterial({ color: 0xef4444, transparent: true, opacity: 0.5 });
+                        controller.add(new THREE.Mesh(new THREE.SphereGeometry(0.015, 16, 16), controllerMat));
                     }
                 });
                 controller.addEventListener('disconnected', () => {
@@ -84,16 +109,97 @@
             }
         }
 
+        // MuJoCo の geom 1 個分の Three.js オブジェクトを作る（size は MuJoCo の半径・半長）。
+        // MuJoCo の円柱・カプセルの軸は z、Three.js は y なので、ジオメトリを x 軸回りに回しておく
+        function makeGeomObject(g) {
+            const [r, gr, b, a] = g.rgba;
+            const material = new THREE.MeshStandardMaterial({
+                color: new THREE.Color(r, gr, b), transparent: a < 1, opacity: a, roughness: 0.6
+            });
+            const s = g.size;
+            switch (g.type) {
+                case 'box':
+                    return new THREE.Mesh(new THREE.BoxGeometry(2 * s[0], 2 * s[1], 2 * s[2]), material);
+                case 'sphere':
+                    return new THREE.Mesh(new THREE.SphereGeometry(s[0], 16, 12), material);
+                case 'cylinder':
+                    return new THREE.Mesh(
+                        new THREE.CylinderGeometry(s[0], s[0], 2 * s[1], 20).rotateX(Math.PI / 2), material);
+                case 'capsule': {
+                    // r128 には CapsuleGeometry がないので、円柱 + 両端の球で作る
+                    const capsule = new THREE.Group();
+                    capsule.add(new THREE.Mesh(
+                        new THREE.CylinderGeometry(s[0], s[0], 2 * s[1], 16).rotateX(Math.PI / 2), material));
+                    for (const z of [-s[1], s[1]]) {
+                        const cap = new THREE.Mesh(new THREE.SphereGeometry(s[0], 16, 12), material);
+                        cap.position.z = z;
+                        capsule.add(cap);
+                    }
+                    capsule.userData.material = material;
+                    return capsule;
+                }
+                case 'plane':
+                    return new THREE.Mesh(new THREE.PlaneGeometry(2 * s[0], 2 * s[1]), material);
+                default:
+                    console.warn('未対応の geom:', g.type);
+                    return null;
+            }
+        }
+
+        // 接続時に 1 回届くシーン情報（geom の形・大きさ・色）から表示を作り直す
+        function buildScene(msg) {
+            geomRoot.clear();
+            robotRoot.scale.setScalar(msg.scale);
+            geomObjects = msg.geoms.map((g) => {
+                const obj = makeGeomObject(g);
+                if (!obj) return null;
+                // 床は影を受けるだけ。半透明の目標球は影を落とさない
+                obj.traverse((o) => {
+                    o.castShadow = g.type !== 'plane' && g.rgba[3] === 1;
+                    o.receiveShadow = true;
+                });
+                geomRoot.add(obj);
+                return obj;
+            });
+            const area = geomObjects[msg.success_geom];
+            successMaterial = area ? (area.userData.material || area.material) : null;
+            successBaseColor = successMaterial ? successMaterial.color.clone() : null;
+            successColor = new THREE.Color(...msg.success_rgba.slice(0, 3));
+        }
+
+        // 30 Hz で届く状態（各 geom の位置・姿勢、配置成功中か、表示位置）を反映する
+        function applyState(msg) {
+            if (!msg.anchor) {
+                robotRoot.visible = false;  // 手の原点が決まるまでは表示しない
+                return;
+            }
+            robotRoot.position.fromArray(msg.anchor);
+            robotRoot.visible = true;
+            msg.poses.forEach((p, i) => {
+                const obj = geomObjects[i];
+                if (!obj) return;
+                obj.position.set(p[0], p[1], p[2]);
+                obj.quaternion.set(p[4], p[5], p[6], p[3]);  // MuJoCo は (w, x, y, z)
+            });
+            if (successMaterial) successMaterial.color.copy(msg.success ? successColor : successBaseColor);
+        }
+
         // WebSocket 接続（切断時は自動で再接続）
         function connect() {
             statusDiv.innerText = 'サーバーに接続中...';
             ws = new WebSocket(WS_URL);
 
+            ws.onmessage = (e) => {
+                const msg = JSON.parse(e.data);
+                if (msg.type === 'scene') buildScene(msg);
+                else if (msg.type === 'state') applyState(msg);
+            };
             ws.onopen = () => {
                 statusDiv.innerText = '✅ 接続済み — VR開始を押してください';
                 startBtn.disabled = false;
             };
             ws.onclose = () => {
+                robotRoot.visible = false;
                 statusDiv.innerText = `切断されました。${RECONNECT_MS / 1000}秒後に再接続します...`;
                 setTimeout(connect, RECONNECT_MS);
             };

@@ -40,6 +40,30 @@ if ! command -v npx >/dev/null 2>&1 || [[ "$(command -v npx)" == /mnt/* ]]; then
     exit 1
 fi
 
+# --- 前回の start_teleop.sh とトンネルが残っていれば終了させる ---
+# （Ctrl+Z で一時停止したまま残ると、トンネルがサブドメインを確保し続けて別の URL になる）
+STALE_TUNNEL="--port $PORT --subdomain $SUBDOMAIN"
+OLD_PIDS=""
+# bash の第 1 引数が start_teleop.sh のものだけを対象にする（文字列を含むだけの別コマンドは除く）
+for pid in $(pgrep -f -- "^(/[^ ]*/)?bash [^ ]*start_teleop\.sh( |$)"); do
+    # 自分自身と、自分のサブシェル（この $(...) など）は除く
+    if [ "$pid" = "$$" ] || [ "$(ps -o ppid= -p "$pid" | tr -d ' ')" = "$$" ]; then
+        continue
+    fi
+    OLD_PIDS="$OLD_PIDS $pid"
+done
+if [ -n "$OLD_PIDS" ] || pgrep -f -- "$STALE_TUNNEL" >/dev/null; then
+    echo "[準備] 前回のトンネル（サブドメイン $SUBDOMAIN）が残っているため終了します"
+    # 一時停止中のプロセスは CONT で再開させないと TERM を処理できない
+    for sig in TERM CONT; do
+        # shellcheck disable=SC2086
+        [ -n "$OLD_PIDS" ] && kill -"$sig" $OLD_PIDS 2>/dev/null
+        pkill -"$sig" -f -- "$STALE_TUNNEL" 2>/dev/null
+    done
+    sleep 2
+    pkill -KILL -f -- "$STALE_TUNNEL" 2>/dev/null
+fi
+
 # --- 前回のプロセスが残っていればポートを解放 ---
 if command -v fuser >/dev/null 2>&1 && fuser "$PORT/tcp" >/dev/null 2>&1; then
     echo "[準備] ポート $PORT を使用中のプロセスを終了します"

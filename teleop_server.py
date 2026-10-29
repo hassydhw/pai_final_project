@@ -3,7 +3,7 @@ Quest 3 VR テレオペ統合サーバー（Phase 3）
 
 1 つのプロセス・1 つのポートで以下をすべて処理する:
   - GET /    : index.html の配信（WebXR クライアント）
-  - GET /ws  : WebSocket（Quest 3 からのコントローラ位置・グリップ値の受信）
+  - GET /ws  : WebSocket（Quest 3 からのコントローラ位置・グリップ値の受信、VR 表示用のシーン状態の送信）
   - MuJoCo   : SO-101 アームの IK 追従 + グリッパー開閉 + Pick & Place 物理シミュレーション
 
 スレッド構成:
@@ -41,7 +41,7 @@ L_TOOL = 0.095       # 手首（joint4）→ 把持中心（ee_site）
 FINGER_OPEN = 0.03   # 指 1 本あたりの最大開き量 [m]
 
 # --- テレオペのマッピング ---
-HOME_TARGET = np.array([0.15, 0.0, 0.15])  # 初回接続時の手の位置に対応するアーム先端位置
+HOME_TARGET = np.array([0.15, 0.0, 0.12])  # 初回接続時の手の位置に対応するアーム先端位置（届く範囲内にする）
 SCALE = 0.5                                # 手の移動量 → アーム移動量の倍率
 Z_MIN = 0.018                              # 指先が床にめり込まない最低高さ
 R_MIN = 0.06                               # 土台に近づきすぎないための最小水平距離
@@ -60,9 +60,23 @@ AREA_SUCCESS_RGBA = [1.0, 0.85, 0.1, 1.0]    # 成功中は目標エリアを黄
 
 JOINT_LIMITS = [(-3.14, 3.14), (-1.57, 1.57), (-2.2, 2.2), (-2.0, 2.0)]
 
+# Quest 3 の VR 空間にアームとブロックを表示するための状態送信
+STATE_HZ = 60          # 各 geom の位置・姿勢を送る頻度（一定間隔で送るとカクつきにくい）
+VR_FLOOR_HALF = 0.25   # 床（plane）は VR 内では作業エリア周りの机として表示する（半幅、ロボット座標 [m]）
+
+
+def robot_to_xr(v):
+    """ロボット座標（x=前, y=左, z=上）→ WebXR 座標（x=右, y=上, z=手前）"""
+    return np.array([-v[1], v[2], -v[0]])
+
+
+def xr_to_robot(v):
+    """WebXR 座標 → ロボット座標（robot_to_xr の逆変換）"""
+    return np.array([-v[2], -v[0], v[1]])
+
 
 class TeleopState:
-    """WebSocket スレッドと物理ループで共有する最新入力（スレッドセーフ）"""
+    """WebSocket スレッドと物理ループで共有する最新入力・シーン状態（スレッドセーフ）"""
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -71,6 +85,8 @@ class TeleopState:
         self.initial_quest_pos = None
         self._origin_target = HOME_TARGET.copy()
         self.block_reset_requested = False
+        self._poses = None
+        self._success = False
 
     def reset_origin(self):
         """次に受信した手の位置を新しい原点にする（再接続時・A ボタン押下時）"""
@@ -89,8 +105,7 @@ class TeleopState:
 
             # Quest 3 の座標変化をアームの作業可動域にスケーリング
             # WebXR: x=右, y=上, z=手前（前方は -z） → ロボット: x=前, y=左, z=上
-            delta = (q - self.initial_quest_pos) * SCALE
-            self.target_pos = self._origin_target + np.array([-delta[2], -delta[0], delta[1]])
+            self.target_pos = self._origin_target + xr_to_robot(q - self.initial_quest_pos) * SCALE
             self.gripper = grip
             if payload.get("reset_block"):
                 self.block_reset_requested = True
@@ -104,6 +119,25 @@ class TeleopState:
     def snapshot(self):
         with self.lock:
             return self.target_pos.copy(), self.gripper
+
+    def publish_scene(self, poses, success):
+        """物理ループから最新の geom の位置・姿勢と配置成功中かどうかを渡す"""
+        with self.lock:
+            self._poses, self._success = poses, success
+
+    def scene_state(self):
+        """
+        VR に送る状態メッセージ。
+        anchor は VR 内でロボット座標の原点を置く位置で、手の原点とアームの原点目標が
+        重なるように決める（= コントローラの位置にグリッパーが来る）。手の原点が未定なら None。
+        """
+        with self.lock:
+            if self._poses is None:
+                return None
+            anchor = None
+            if self.initial_quest_pos is not None:
+                anchor = np.round(self.initial_quest_pos - robot_to_xr(self._origin_target) / SCALE, 4).tolist()
+            return {"type": "state", "poses": self._poses, "success": self._success, "anchor": anchor}
 
 
 def clamp_target(target):
@@ -191,6 +225,43 @@ def load_model():
     return model, data
 
 
+def scene_description(model):
+    """
+    VR 側で描画する geom の一覧（形・大きさ・色）。接続時に 1 回だけ送る。
+    透明な geom は除き、床（plane）は作業エリア周りの大きさに切り詰める。
+    """
+    geoms, ids = [], []
+    for i in range(model.ngeom):
+        rgba = model.geom_rgba[i]
+        if rgba[3] == 0:
+            continue
+        gtype = mujoco.mjtGeom(model.geom_type[i]).name.removeprefix("mjGEOM_").lower()
+        size = model.geom_size[i].copy()
+        if gtype == "plane":
+            size[:2] = VR_FLOOR_HALF
+        ids.append(i)
+        geoms.append({"name": model.geom(i).name, "type": gtype,
+                      "size": np.round(size, 4).tolist(), "rgba": np.round(rgba, 3).tolist()})
+    message = {
+        "type": "scene",
+        "scale": 1.0 / SCALE,  # VR 内ではアームを手の動きと同じ縮尺（1 / SCALE 倍）で表示する
+        "geoms": geoms,
+        "success_geom": ids.index(model.geom("place_area_geom").id),
+        "success_rgba": AREA_SUCCESS_RGBA,
+    }
+    return message, ids
+
+
+def scene_poses(data, geom_ids):
+    """各 geom の位置と姿勢 [x, y, z, qw, qx, qy, qz]（ロボット座標）"""
+    quat = np.empty(4)
+    poses = []
+    for i in geom_ids:
+        mujoco.mju_mat2Quat(quat, data.geom_xmat[i])
+        poses.append(np.round(np.concatenate([data.geom_xpos[i], quat]), 4).tolist())
+    return poses
+
+
 class TaskMonitor:
     """Pick & Place の進行状況（持ち上げ・配置成功）を判定してログ出力する"""
 
@@ -253,25 +324,47 @@ class TaskMonitor:
 # HTTP / WebSocket サーバー（aiohttp）
 # ---------------------------------------------------------------------------
 
-def create_app(state):
+def create_app(state, scene):
+    scene_json = json.dumps(scene)
+
     async def index(request):
         # トンネル越しに .git や .py が見えないよう、index.html だけを配信する
         return web.FileResponse(INDEX_HTML, headers={"Cache-Control": "no-cache"})
+
+    async def send_states(ws):
+        """シミュレーションの最新状態を STATE_HZ で送り続ける（VR 内のアーム・ブロック表示用）"""
+        loop = asyncio.get_running_loop()
+        next_send = loop.time()
+        try:
+            while not ws.closed:
+                message = state.scene_state()
+                if message is not None:
+                    await ws.send_str(json.dumps(message))
+                # 送信にかかった時間で周期がずれないよう、予定時刻を基準に待つ
+                next_send = max(next_send + 1.0 / STATE_HZ, loop.time())
+                await asyncio.sleep(next_send - loop.time())
+        except ConnectionResetError:
+            pass
 
     async def websocket(request):
         ws = web.WebSocketResponse(heartbeat=20)
         await ws.prepare(request)
         print(f"\n[接続成功] Quest 3 Teleop 接続確立: {request.remote}")
         state.reset_origin()
+        await ws.send_str(scene_json)
+        sender = asyncio.create_task(send_states(ws))
 
-        async for msg in ws:
-            if msg.type == WSMsgType.TEXT:
-                try:
-                    state.update_from_quest(json.loads(msg.data))
-                except (ValueError, KeyError, TypeError) as e:
-                    print(f"[警告] 不正なデータを無視しました: {e}")
-            elif msg.type == WSMsgType.ERROR:
-                print(f"[エラー] WebSocket: {ws.exception()}")
+        try:
+            async for msg in ws:
+                if msg.type == WSMsgType.TEXT:
+                    try:
+                        state.update_from_quest(json.loads(msg.data))
+                    except (ValueError, KeyError, TypeError) as e:
+                        print(f"[警告] 不正なデータを無視しました: {e}")
+                elif msg.type == WSMsgType.ERROR:
+                    print(f"[エラー] WebSocket: {ws.exception()}")
+        finally:
+            sender.cancel()
 
         print("[切断] Quest 3 との接続が切れました")
         return ws
@@ -283,14 +376,14 @@ def create_app(state):
     return app
 
 
-def start_web_server(state, host, port):
+def start_web_server(state, scene, host, port):
     """aiohttp を別スレッドで起動し、待ち受け開始まで待つ"""
     ready = threading.Event()
     error = []
 
     def run():
         async def main():
-            runner = web.AppRunner(create_app(state), access_log=None)
+            runner = web.AppRunner(create_app(state, scene), access_log=None)
             await runner.setup()
             await web.TCPSite(runner, host, port).start()
             ready.set()
@@ -331,6 +424,7 @@ def run_simulation(model, data, state, viewer=None):
     area_rgba = model.geom_rgba[area_geom].copy()
     success_count = 0
     success_until = None  # 配置成功後、この時刻（perf_counter）になったらブロックを再配置する
+    _, scene_ids = scene_description(model)
 
     reset_block(model, data, rng)
     show_overlay(viewer, success_count, success=False)
@@ -375,6 +469,9 @@ def run_simulation(model, data, state, viewer=None):
             model.geom_rgba[area_geom] = area_rgba
             show_overlay(viewer, success_count, success=False)
 
+        # VR 表示用に毎回最新の状態を渡す（送信は WebSocket 側が STATE_HZ で行う）
+        state.publish_scene(scene_poses(data, scene_ids), success_until is not None)
+
         if viewer is not None:
             viewer.sync()
         time.sleep(0.005)
@@ -388,8 +485,9 @@ def main():
     args = parser.parse_args()
 
     state = TeleopState()
-    start_web_server(state, args.host, args.port)
     model, data = load_model()
+    scene, _ = scene_description(model)
+    start_web_server(state, scene, args.host, args.port)
 
     print("\n==========================================")
     print(" Quest 3 VR テレオペ統合サーバー起動")
