@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 東大 PAI 応用コース最終課題「Meta Quest 3 + WebXR による VR テレオペ & MuJoCo 上の SO-101 アーム連動環境」。
-やり取りは日本語で行う。詳しい経緯・設計判断は `261029-phase3-handover.md`（以下、引継書）を参照。
+やり取りは日本語で行う。最新の状況・次にやることは `reportingMemo/261030-phase4-handover.md`（Phase 4 の引継書 兼 作業記録）、それ以前の経緯・設計判断は `261029-phase3-handover.md`（以下、Phase 3 の引継書）を参照。
 
 ## 作業のルール（必ず守る）
 
@@ -65,7 +65,7 @@ curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8011/teleop_server.py 
 
 - node は nvm 経由（`source ~/.nvm/nvm.sh`）。PATH には Windows 側の `npx`（`/mnt/c/...`）も入っているので注意。
 
-## 変更するときの注意（詳細は引継書 §4）
+## 変更するときの注意（詳細は Phase 3 の引継書 §4 と Phase 4 の引継書 §4）
 
 - 制御は `data.ctrl`（position アクチュエータ）で行い、`qpos` を直接書かない（接触が破綻する）。
 - qpos のインデックスは決め打ちせず `model.joint(name).qposadr` で取る（先頭は `red_block` の freejoint）。

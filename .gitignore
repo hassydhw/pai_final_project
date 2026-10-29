@@ -23,6 +23,8 @@ logs/
 
 # ===== テレオペ記録データ（将来の LeRobot 用データ収集） =====
 data/
+# 退避した古いデータ（試験学習に使った旧形式のエピソードなど）
+old_data/
 # 学習の出力（lerobot-train のチェックポイント・評価動画）
 outputs/
 recordings/
