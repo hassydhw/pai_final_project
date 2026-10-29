@@ -486,7 +486,7 @@ def run_simulation(model, data, state, viewer=None, recorder=None):
             success_until = time.perf_counter() + SUCCESS_HOLD_SEC
             model.geom_rgba[area_geom] = AREA_SUCCESS_RGBA
             if recorder is not None:
-                recorder.save()
+                recorder.mark_success(data)
             show_overlay(viewer, success_count, True, recorder)
 
         reset_reason = None

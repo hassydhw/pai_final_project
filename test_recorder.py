@@ -3,10 +3,11 @@
 
 run_simulation を viewer なしで動かし、Quest 3 の代わりに TeleopState へ手の位置を送って
 test_pick_place.py と同じ手順で Pick & Place する（実時間で約 15 秒）。
-  1. 配置成功 → エピソードが 1 つ保存される
+  1. 配置成功 → 1 秒（POST_SUCCESS_SEC）記録を続けてからエピソードが 1 つ保存される
   2. 次のエピソード中に B ボタン → 破棄される
   3. 次のエピソード中に切断 → 破棄される
   4. render_episodes.py で画像を追加できる
+  5. 成功後の延長記録中に B ボタンが来ても、成功エピソードとして保存される
 一時ディレクトリに保存するので data/episodes/ は汚さない。
 
   python3 test_recorder.py          # 終わったら一時ディレクトリを消す
@@ -23,9 +24,10 @@ import time
 from pathlib import Path
 
 import h5py
+import mujoco
 import numpy as np
 
-from recorder import RECORD_FPS, EpisodeRecorder
+from recorder import POST_SUCCESS_SEC, RECORD_FPS, EpisodeRecorder
 from teleop_server import (HOME_TARGET, MODEL_XML, SCALE, TeleopState, load_model, robot_to_xr,
                            run_simulation)
 from test_pick_place import make_waypoints
@@ -73,6 +75,20 @@ def wait_until(condition, timeout, message):
     while not condition():
         assert time.time() < deadline, message
         time.sleep(0.02)
+
+
+def check_interrupt_after_success(out_dir):
+    """成功後の延長記録中に B ボタン（discard）が来ても、その時点までが成功エピソードとして保存される"""
+    model, data = load_model()
+    recorder = EpisodeRecorder(model, "<mujoco/>", out_dir=out_dir, verbose=False)
+    recorder.poll(data, connected=True)
+    for _ in range(100):  # 0.2 秒
+        recorder.record(data, np.zeros(4))
+        mujoco.mj_step(model, data)
+    recorder.mark_success(data)
+    recorder.discard("B ボタン")
+    assert recorder.saved_count == 1 and not recorder.active, "成功後の B ボタンで成功エピソードが保存されません"
+    print("成功後の延長記録中の B ボタン → 保存（OK）")
 
 
 def run(keep=False):
@@ -126,8 +142,16 @@ def run(keep=False):
         assert np.allclose(np.diff(t), 1 / RECORD_FPS, atol=0.0021), "フレーム間隔が一定ではありません"
         assert shapes["observation/qpos"] == (n, 6) and shapes["action"] == (n, 6)
         assert shapes["action_ee"] == (n, 4) and shapes["sim/qpos"] == (n, model.nq)
-        # 手順全体は 8.1 秒。配置成功は「離す」の途中で判定されるので、それより少し短くなる（実行ごとに揺れる）
+        # 手順全体は 8.1 秒。配置成功は「離す」の途中で判定され、そこから POST_SUCCESS_SEC だけ続く（実行ごとに揺れる）
         assert 5.0 < t[-1] < 12.0, "エピソードの長さが手順の時間と合いません"
+        success_time = h5.attrs["success_time"]
+        assert abs(t[-1] - success_time - POST_SUCCESS_SEC) < 2 / RECORD_FPS, "成功後の記録時間が違います"
+        # 最後は離して手を引いている（グリップ値 0、把持中心が成功時より上）
+        k = int(round(success_time * RECORD_FPS))
+        ee_z = h5["observation/ee_pos"][:, 2]
+        print(f"成功判定 {success_time:.2f} 秒 → 終了 {t[-1]:.2f} 秒、把持中心の高さ {ee_z[k]:.3f} → {ee_z[-1]:.3f} m")
+        assert h5["action_ee"][-1, 3] < 0.01, "最後のフレームでグリッパーが開いていません"
+        assert ee_z[-1] > ee_z[k] + 0.01, "成功後に手を引く動きが記録されていません"
         # 掴んでいる間はグリップ値が 1、ブロックは持ち上がっている
         block_z = h5["sim/qpos"][:, 2]
         assert block_z.max() > 0.07, "記録の中でブロックが持ち上がっていません"
@@ -142,6 +166,9 @@ def run(keep=False):
             images = h5[f"observation/images/{name}"]
             assert images.shape == (n, 240, 320, 3) and images.dtype == np.uint8
             assert images[n // 2].std() > 10, f"{name} の画像が真っ黒（または単色）です"
+
+    # 5. 成功後の延長記録中の中断
+    check_interrupt_after_success(out_dir / "interrupt")
 
     if keep:
         print(f"\n記録とプレビュー画像: {out_dir}")

@@ -30,7 +30,7 @@ teleop_server.py（ポート 8000）
 | `start_teleop.sh` | サーバー + LocalTunnel の一括起動（ユーザーが実行する） |
 | `test_pick_place.py` | ヘッドレスの Pick & Place 回帰テスト（初期位置 + ランダム配置の四隅） |
 | `send_test.py` | `ws://localhost:8000/ws` にダミーの姿勢を送る |
-| `recorder.py` | エピソード記録（`teleop_server.py --record`）。配置成功で `data/episodes/episode_XXXXXX.hdf5` に保存、B ボタン・切断などで破棄 |
+| `recorder.py` | エピソード記録（`teleop_server.py --record`）。配置成功の 1 秒後（離して手を引くまで）に `data/episodes/episode_XXXXXX.hdf5` に保存、成功前の B ボタン・切断などで破棄 |
 | `render_episodes.py` | 記録の `sim/qpos` から EGL でカメラ画像（`cam_front` / `cam_wrist`）を描いて `observation/images/*` に追加 |
 | `test_recorder.py` | 記録 → 画像追加のヘッドレス結合テスト（実時間で約 17 秒） |
 | `convert_to_lerobot.py` | 記録を LeRobot 形式（`data/lerobot/so101_pick_place`、画像は PNG）に変換。`~/lerobot_env` で実行 |
