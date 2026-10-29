@@ -3,6 +3,7 @@ Pick & Place 環境のヘッドレス自動テスト
 
 Quest 3 なしで、teleop_server.py と同じ IK / グリッパー制御を使い
 ウェイポイントを順番にたどって「掴む → 持ち上げる → 目標エリアに置く」を検証する。
+ブロックの初期位置に加え、ランダム再配置の範囲の四隅（向きも最大までずらす）でも試す。
 
   python3 test_pick_place.py          # 結果だけ表示
   python3 test_pick_place.py --view   # MuJoCo viewer で動きを確認
@@ -15,33 +16,46 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
-from teleop_server import TaskMonitor, apply_control, load_model
-
-# (目標位置 [x, y, z], グリップ値, 移動にかける秒数)
-BLOCK = np.array([0.17, 0.10])
-AREA = np.array([0.16, -0.12])
-WAYPOINTS = [
-    ([*BLOCK, 0.08], 0.0, 1.0),   # ブロック上空へ
-    ([*BLOCK, 0.018], 0.0, 1.0),  # 降下
-    ([*BLOCK, 0.018], 1.0, 0.8),  # 掴む
-    ([*BLOCK, 0.10], 1.0, 1.0),   # 持ち上げ
-    ([*AREA, 0.10], 1.0, 1.5),    # 目標エリア上空へ
-    ([*AREA, 0.025], 1.0, 1.0),   # 降下
-    ([*AREA, 0.025], 0.0, 0.8),   # 離す
-    ([*AREA, 0.10], 0.0, 1.0),    # 退避
-]
+from teleop_server import BLOCK_RANDOM_XY, BLOCK_RANDOM_YAW, TaskMonitor, apply_control, load_model
 
 
-def run(view=False):
+def make_waypoints(block, area):
+    """(目標位置 [x, y, z], グリップ値, 移動にかける秒数) のリスト"""
+    return [
+        ([*block, 0.08], 0.0, 1.0),   # ブロック上空へ
+        ([*block, 0.018], 0.0, 1.0),  # 降下
+        ([*block, 0.018], 1.0, 0.8),  # 掴む
+        ([*block, 0.10], 1.0, 1.0),   # 持ち上げ
+        ([*area, 0.10], 1.0, 1.5),    # 目標エリア上空へ
+        ([*area, 0.025], 1.0, 1.0),   # 降下
+        ([*area, 0.025], 0.0, 0.8),   # 離す
+        ([*area, 0.10], 0.0, 1.0),    # 退避
+    ]
+
+
+def place_block(model, data, offset, yaw):
+    """ブロックを keyframe "home" の位置から offset [m] ずらし、z 軸回りに yaw [rad] 回して置く"""
+    qadr = model.joint("red_block_joint").qposadr[0]
+    data.qpos[qadr:qadr + 2] += offset
+    data.qpos[qadr + 3:qadr + 7] = [np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)]
+    mujoco.mj_forward(model, data)
+    return data.qpos[qadr:qadr + 2].copy()
+
+
+def run_case(offset=(0.0, 0.0), yaw=0.0, view=False):
     model, data = load_model()
+    block_xy = place_block(model, data, np.array(offset), yaw)
+    area_xy = model.body("place_area").pos[:2].copy()
     monitor = TaskMonitor(model)
     block = model.body("red_block").id
     viewer = mujoco.viewer.launch_passive(model, data) if view else None
 
+    print(f"\n[ブロック ({block_xy[0]:.3f}, {block_xy[1]:.3f}), "
+          f"r={np.hypot(*block_xy):.3f}, yaw={yaw:+.2f}]")
     prev_target = np.array([0.15, 0.0, 0.15])
     prev_grip = 0.0
     max_z = 0.0
-    for target, grip, duration in WAYPOINTS:
+    for target, grip, duration in make_waypoints(block_xy, area_xy):
         target = np.array(target)
         n = int(duration / model.opt.timestep)
         for i in range(n):
@@ -67,11 +81,23 @@ def run(view=False):
     if viewer is not None:
         viewer.close()
 
-    final = data.xpos[block]
-    print(f"\n最大持ち上げ高さ: {max_z:.3f} m / 最終位置: {np.round(final, 3)}")
+    print(f"  最大持ち上げ高さ: {max_z:.3f} m / 最終位置: {np.round(data.xpos[block], 3)}")
     assert max_z > 0.07, "ブロックが十分に持ち上がっていません（滑り落ちた可能性）"
     assert monitor.placed, "ブロックが目標エリアに置かれていません"
-    print("✅ Pick & Place テスト成功")
+
+
+def run(view=False):
+    d, yaw = BLOCK_RANDOM_XY, BLOCK_RANDOM_YAW
+    cases = [
+        ((0.0, 0.0), 0.0),   # 初期位置
+        ((+d, +d), +yaw),    # 奥・左（土台から最も遠い）
+        ((+d, -d), -yaw),
+        ((-d, +d), -yaw),
+        ((-d, -d), +yaw),
+    ]
+    for offset, case_yaw in cases:
+        run_case(offset, case_yaw, view)
+    print(f"\n✅ Pick & Place テスト成功（{len(cases)} ケース）")
 
 
 if __name__ == "__main__":
