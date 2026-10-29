@@ -23,10 +23,10 @@
         <div id="wsUrl"></div>
         <button id="startBtn" disabled>VR開始</button>
         <div id="help">
-            VR 内にアームとブロックを表示（右手の位置にグリッパーが来る）<br>
+            VR 内にアームとブロックを表示（アームの最上部が目の高さ。右手の位置にグリッパーが来る）<br>
             右手コントローラの位置 → アーム先端<br>
             グリップボタン → グリッパー開閉（押し込むと閉じる）<br>
-            A ボタン → 原点リセット（今の手の位置を基準に取り直す）<br>
+            A ボタン → 前後左右の原点リセット（今の手の位置を基準に取り直す。机の高さはそのまま）<br>
             B ボタン → 赤ブロックを再配置（配置成功後は自動で再配置）
         </div>
     </div>
@@ -238,11 +238,19 @@
                     document.getElementById('info').style.display = '';
                 });
 
+                // VR を開始するたびに、最初に目の高さが取れたフレームで机の高さを決め直してもらう
+                let needRecenter = true;
+
                 // VR描画 & リアルタイムデータ送信ループ
-                renderer.setAnimationLoop(() => {
+                renderer.setAnimationLoop((time, frame) => {
                     renderer.render(scene, camera);
 
                     if (!controllerRight || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+                    // HMD（目）の高さ。サーバーはこれにアームの最上部が来るよう机の高さを決める
+                    const viewerPose = frame && frame.getViewerPose(renderer.xr.getReferenceSpace());
+                    if (!viewerPose) return;
+                    const eye = viewerPose.transform.position.y;
 
                     const pos = controllerRight.position;
                     const { grip, aPressed, bPressed } = readRightGamepad(session);
@@ -252,8 +260,13 @@
                         x: parseFloat(pos.x.toFixed(3)),
                         y: parseFloat(pos.y.toFixed(3)),
                         z: parseFloat(pos.z.toFixed(3)),
-                        gripper: parseFloat(grip.toFixed(2))
+                        gripper: parseFloat(grip.toFixed(2)),
+                        eye: parseFloat(eye.toFixed(3))
                     };
+                    if (needRecenter) {
+                        payload.recenter = true;
+                        needRecenter = false;
+                    }
                     // A ボタンを押した瞬間だけ原点リセットを要求
                     if (aPressed && !prevAPressed) payload.reset = true;
                     if (bPressed && !prevBPressed) payload.reset_block = true;

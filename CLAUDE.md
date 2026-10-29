@@ -30,6 +30,9 @@ teleop_server.py（ポート 8000）
 | `start_teleop.sh` | サーバー + LocalTunnel の一括起動（ユーザーが実行する） |
 | `test_pick_place.py` | ヘッドレスの Pick & Place 回帰テスト（初期位置 + ランダム配置の四隅） |
 | `send_test.py` | `ws://localhost:8000/ws` にダミーの姿勢を送る |
+| `recorder.py` | エピソード記録（`teleop_server.py --record`）。配置成功で `data/episodes/episode_XXXXXX.hdf5` に保存、B ボタン・切断などで破棄 |
+| `render_episodes.py` | 記録の `sim/qpos` から EGL でカメラ画像（`cam_front` / `cam_wrist`）を描いて `observation/images/*` に追加 |
+| `test_recorder.py` | 記録 → 画像追加のヘッドレス結合テスト（実時間で約 17 秒） |
 | `teleop_mujoco.py`, `load_so101.py`, `test_mujoco.py`, `vr_server_test.py` | Phase 2 以前の旧ファイル（使っていない） |
 
 ## 検証コマンド
@@ -37,6 +40,7 @@ teleop_server.py（ポート 8000）
 ```bash
 source ~/pai_env/bin/activate && cd ~/pai_final_project
 python test_pick_place.py    # 最後に「✅ Pick & Place テスト成功」
+python test_recorder.py      # 最後に「✅ 記録テスト成功」（記録・画像まわりを変えたとき）
 
 # スモークテスト（8000 番と被らないポートで）
 timeout 10 python -u teleop_server.py --no-viewer --port 8011 &
@@ -52,7 +56,9 @@ curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8011/teleop_server.py 
 - 制御は `data.ctrl`（position アクチュエータ）で行い、`qpos` を直接書かない（接触が破綻する）。
 - qpos のインデックスは決め打ちせず `model.joint(name).qposadr` で取る（先頭は `red_block` の freejoint）。
 - `SHOULDER_Z`・`L1`・`L2`・`L_TOOL`・`FINGER_OPEN` は XML と一致させる。
-- 座標の変換：`target = origin + [-dz, -dx, dy] * SCALE`（WebXR → ロボット座標）。
+- 座標の変換：`target = origin + [-dz, -dx, dy] * SCALE`（WebXR → ロボット座標）。ただし高さだけは VR 内の机からの手の高さ（絶対値）。
+- VR 内の机の高さは、VR 開始時の目の高さ（クライアントが `eye` と `recenter` を送る）にアームの最上部（`ARM_TOP_Z`）が来るよう固定する。A ボタンは前後左右の原点だけを取り直す。`eye` が来なければ従来どおり手の位置に合わせる。
 - ブロックの初期配置（ランダムな範囲）は、先端が届く r ≈ 0.217 m の内側に収める（掴める限界は指の幅の分だけ広く r ≈ 0.24 m）。配置や `TaskMonitor.REACH_R` を変えたら `test_pick_place.py` を回す。
+- 目標の球（`target_site`）は geom group 2。記録用の画像には写さない（手の位置 = 行動なので学習データに混ぜない）。
 - viewer に重ねる文字（`viewer.set_texts`）は ASCII のみ。
 - HTTP で配信するのは `index.html` だけ（ルートを静的配信すると `.git` や `.py` が見える）。

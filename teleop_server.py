@@ -13,6 +13,7 @@ Quest 3 VR テレオペ統合サーバー（Phase 3）
 使い方:
   python3 teleop_server.py               # viewer あり（WSLg でウィンドウ表示）
   python3 teleop_server.py --no-viewer   # viewer なし（通信テスト用）
+  python3 teleop_server.py --record      # 配置成功したエピソードを data/episodes/ に記録（recorder.py）
 """
 
 import argparse
@@ -26,6 +27,8 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 from aiohttp import WSMsgType, web
+
+from recorder import EpisodeRecorder
 
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_HTML = BASE_DIR / "index.html"
@@ -64,6 +67,10 @@ JOINT_LIMITS = [(-3.14, 3.14), (-1.57, 1.57), (-2.2, 2.2), (-2.0, 2.0)]
 STATE_HZ = 60          # 各 geom の位置・姿勢を送る頻度（一定間隔で送るとカクつきにくい）
 VR_FLOOR_HALF = 0.25   # 床（plane）は VR 内では作業エリア周りの机として表示する（半幅、ロボット座標 [m]）
 
+# VR 内の机の高さ: VR 開始時の目の高さ（HMD）にアームの最上部が来るように固定する（Unity の Eye Level 相当）
+ARM_TOP_Z = 0.23       # HOME_TARGET の姿勢でのアーム最上部（肘の上端）の高さ [m]。HOME_TARGET やリンク長を変えたら測り直す
+EYE_TO_ARM_TOP = 0.0   # 目の高さからアーム最上部までの下げ幅 [m, VR 空間]。正にすると机が下がる
+
 
 def robot_to_xr(v):
     """ロボット座標（x=前, y=左, z=上）→ WebXR 座標（x=右, y=上, z=手前）"""
@@ -84,12 +91,13 @@ class TeleopState:
         self.gripper = 0.0
         self.initial_quest_pos = None
         self._origin_target = HOME_TARGET.copy()
+        self._table_y = None  # VR 内でロボットの床（z=0）を置く高さ
         self.block_reset_requested = False
         self._poses = None
         self._success = False
 
     def reset_origin(self):
-        """次に受信した手の位置を新しい原点にする（再接続時・A ボタン押下時）"""
+        """次に受信した手の位置を新しい原点にする（再接続時）"""
         with self.lock:
             self.initial_quest_pos = None
 
@@ -98,14 +106,24 @@ class TeleopState:
         grip = float(np.clip(payload.get("gripper", 0.0), 0.0, 1.0))
 
         with self.lock:
-            if payload.get("reset") or self.initial_quest_pos is None:
-                # 原点を取り直すときは、アームの現在の目標位置から相対移動を続ける
+            if payload.get("recenter") or self.initial_quest_pos is None:
+                # 接続時・VR 開始時: 前後左右は今の手の位置をホーム位置に対応させ、机の高さは目の高さから決める
                 self.initial_quest_pos = q
-                self._origin_target = self.target_pos.copy() if payload.get("reset") else HOME_TARGET.copy()
+                self._origin_target = HOME_TARGET.copy()
+                if payload.get("eye") is not None:
+                    self._table_y = float(payload["eye"]) - EYE_TO_ARM_TOP - ARM_TOP_Z / SCALE
+                else:  # 目の高さが来ない（旧クライアント・テスト）ときは、今の手の位置にグリッパーを合わせる
+                    self._table_y = q[1] - HOME_TARGET[2] / SCALE
+            elif payload.get("reset"):
+                # A ボタン: 前後左右の原点だけを今の目標位置から取り直す（机の高さは変えない）
+                self.initial_quest_pos = q
+                self._origin_target = self.target_pos.copy()
 
-            # Quest 3 の座標変化をアームの作業可動域にスケーリング
+            # 前後左右: Quest 3 の座標変化をアームの作業可動域にスケーリング
             # WebXR: x=右, y=上, z=手前（前方は -z） → ロボット: x=前, y=左, z=上
             self.target_pos = self._origin_target + xr_to_robot(q - self.initial_quest_pos) * SCALE
+            # 高さ: VR 内の机からの手の高さをそのまま使う（手を机より下げるとグリッパーは机の上で止まる）
+            self.target_pos[2] = (q[1] - self._table_y) * SCALE
             self.gripper = grip
             if payload.get("reset_block"):
                 self.block_reset_requested = True
@@ -120,6 +138,11 @@ class TeleopState:
         with self.lock:
             return self.target_pos.copy(), self.gripper
 
+    def connected(self):
+        """Quest 3 から手の位置を受け取っているか（接続直後・切断後は False）"""
+        with self.lock:
+            return self.initial_quest_pos is not None
+
     def publish_scene(self, poses, success):
         """物理ループから最新の geom の位置・姿勢と配置成功中かどうかを渡す"""
         with self.lock:
@@ -128,15 +151,17 @@ class TeleopState:
     def scene_state(self):
         """
         VR に送る状態メッセージ。
-        anchor は VR 内でロボット座標の原点を置く位置で、手の原点とアームの原点目標が
-        重なるように決める（= コントローラの位置にグリッパーが来る）。手の原点が未定なら None。
+        anchor は VR 内でロボット座標の原点を置く位置。前後左右は手の原点とアームの原点目標が重なるように、
+        高さは机の高さに置く（= 届く範囲ではコントローラの位置にグリッパーが来る）。手の原点が未定なら None。
         """
         with self.lock:
             if self._poses is None:
                 return None
             anchor = None
             if self.initial_quest_pos is not None:
-                anchor = np.round(self.initial_quest_pos - robot_to_xr(self._origin_target) / SCALE, 4).tolist()
+                anchor = self.initial_quest_pos - robot_to_xr(self._origin_target) / SCALE
+                anchor[1] = self._table_y
+                anchor = np.round(anchor, 4).tolist()
             return {"type": "state", "poses": self._poses, "success": self._success, "anchor": anchor}
 
 
@@ -405,19 +430,22 @@ def start_web_server(state, scene, host, port):
 # 物理シミュレーションループ
 # ---------------------------------------------------------------------------
 
-def show_overlay(viewer, success_count, success):
+def show_overlay(viewer, success_count, success, recorder=None):
     """viewer に成功回数と（成功時は）大きなメッセージを重ねて表示する（MuJoCo のフォントは ASCII のみ）"""
     if viewer is None:
         return
     texts = [(mujoco.mjtFontScale.mjFONTSCALE_150, mujoco.mjtGridPos.mjGRID_BOTTOMRIGHT,
               "Success\nB button", f"{success_count}\nreset block")]
+    if recorder is not None:
+        texts.append((mujoco.mjtFontScale.mjFONTSCALE_150, mujoco.mjtGridPos.mjGRID_BOTTOMLEFT,
+                      "REC" if recorder.active else "Standby", f"saved {recorder.saved_count}"))
     if success:
         texts.append((mujoco.mjtFontScale.mjFONTSCALE_300, mujoco.mjtGridPos.mjGRID_TOP,
                       "SUCCESS!  Block placed", None))
     viewer.set_texts(texts)
 
 
-def run_simulation(model, data, state, viewer=None):
+def run_simulation(model, data, state, viewer=None, recorder=None):
     monitor = TaskMonitor(model)
     rng = np.random.default_rng()
     area_geom = model.geom("place_area_geom").id
@@ -427,13 +455,16 @@ def run_simulation(model, data, state, viewer=None):
     _, scene_ids = scene_description(model)
 
     reset_block(model, data, rng)
-    show_overlay(viewer, success_count, success=False)
+    show_overlay(viewer, success_count, False, recorder)
     wall_start = time.perf_counter()
     sim_start = data.time
 
     while viewer is None or viewer.is_running():
         target, grip = state.snapshot()
         apply_control(model, data, target, grip)
+        if recorder is not None and recorder.poll(data, state.connected()):
+            show_overlay(viewer, success_count, success_until is not None, recorder)
+        action_ee = np.append(clamp_target(target), grip)
 
         # viewer の Backspace でリセットされると data.time が巻き戻るので基準を取り直す
         if data.time < sim_start:
@@ -444,6 +475,8 @@ def run_simulation(model, data, state, viewer=None):
         for _ in range(50):
             if data.time - sim_start >= wall_elapsed:
                 break
+            if recorder is not None:
+                recorder.record(data, action_ee)
             mujoco.mj_step(model, data)
         else:
             wall_start, sim_start = time.perf_counter(), data.time
@@ -452,7 +485,9 @@ def run_simulation(model, data, state, viewer=None):
             success_count += 1
             success_until = time.perf_counter() + SUCCESS_HOLD_SEC
             model.geom_rgba[area_geom] = AREA_SUCCESS_RGBA
-            show_overlay(viewer, success_count, success=True)
+            if recorder is not None:
+                recorder.save()
+            show_overlay(viewer, success_count, True, recorder)
 
         reset_reason = None
         if success_until is not None and time.perf_counter() >= success_until:
@@ -467,7 +502,10 @@ def run_simulation(model, data, state, viewer=None):
             monitor.reset()
             success_until = None
             model.geom_rgba[area_geom] = area_rgba
-            show_overlay(viewer, success_count, success=False)
+            if recorder is not None:
+                recorder.discard(reset_reason)
+                recorder.arm()
+            show_overlay(viewer, success_count, False, recorder)
 
         # VR 表示用に毎回最新の状態を渡す（送信は WebSocket 側が STATE_HZ で行う）
         state.publish_scene(scene_poses(data, scene_ids), success_until is not None)
@@ -482,12 +520,14 @@ def main():
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--no-viewer", action="store_true", help="MuJoCo viewer を開かずに実行する")
+    parser.add_argument("--record", action="store_true", help="配置成功したエピソードを data/episodes/ に記録する")
     args = parser.parse_args()
 
     state = TeleopState()
     model, data = load_model()
     scene, _ = scene_description(model)
     start_web_server(state, scene, args.host, args.port)
+    recorder = EpisodeRecorder(model, MODEL_XML.read_text(encoding="utf-8")) if args.record else None
 
     print("\n==========================================")
     print(" Quest 3 VR テレオペ統合サーバー起動")
@@ -496,11 +536,13 @@ def main():
     print("  グリップ  : 押し込むとグリッパーが閉じる")
     print("  A ボタン  : 原点リセット / B ボタン : ブロックを再配置")
     print(f"  配置成功  : 画面にメッセージ表示 → {SUCCESS_HOLD_SEC:.0f} 秒後にブロックをランダムに再配置")
+    if recorder is not None:
+        print(f"  記録      : 配置成功したエピソードを {recorder.out_dir} に保存（次は episode_{recorder.next_index:06d}）")
     print("==========================================")
 
     try:
         if args.no_viewer:
-            run_simulation(model, data, state)
+            run_simulation(model, data, state, recorder=recorder)
         else:
             with mujoco.viewer.launch_passive(model, data) as viewer:
                 with viewer.lock():
@@ -508,7 +550,7 @@ def main():
                     viewer.cam.distance = VIEWER_CAMERA["distance"]
                     viewer.cam.azimuth = VIEWER_CAMERA["azimuth"]
                     viewer.cam.elevation = VIEWER_CAMERA["elevation"]
-                run_simulation(model, data, state, viewer)
+                run_simulation(model, data, state, viewer, recorder)
     except KeyboardInterrupt:
         pass
     print("\nサーバーを終了しました。")
