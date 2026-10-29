@@ -46,6 +46,18 @@ SCALE = 0.5                                # 手の移動量 → アーム移動
 Z_MIN = 0.018                              # 指先が床にめり込まない最低高さ
 R_MIN = 0.06                               # 土台に近づきすぎないための最小水平距離
 
+# MuJoCo viewer の初期視点: アームの真後ろやや上から作業エリアを見る
+# （操作者と同じ向き → 手を前に出す = 画面の奥、手を右に出す = 画面の右）
+VIEWER_CAMERA = dict(lookat=[0.15, 0.0, 0.04], distance=0.50, azimuth=0.0, elevation=-30.0)
+
+# ブロック再配置時のランダム幅（初期位置 (0.17, 0.10) を中心に）
+BLOCK_RANDOM_XY = 0.03     # ±3cm
+BLOCK_RANDOM_YAW = 0.5     # ±約 30°（大きすぎると角を掴むことになり難しくなる）
+
+# 配置成功時の演出
+SUCCESS_HOLD_SEC = 2.0                       # メッセージ表示からブロック再配置までの時間
+AREA_SUCCESS_RGBA = [1.0, 0.85, 0.1, 1.0]    # 成功中は目標エリアを黄色に光らせる
+
 JOINT_LIMITS = [(-3.14, 3.14), (-1.57, 1.57), (-2.2, 2.2), (-2.0, 2.0)]
 
 
@@ -58,6 +70,7 @@ class TeleopState:
         self.gripper = 0.0
         self.initial_quest_pos = None
         self._origin_target = HOME_TARGET.copy()
+        self.block_reset_requested = False
 
     def reset_origin(self):
         """次に受信した手の位置を新しい原点にする（再接続時・A ボタン押下時）"""
@@ -75,9 +88,18 @@ class TeleopState:
                 self._origin_target = self.target_pos.copy() if payload.get("reset") else HOME_TARGET.copy()
 
             # Quest 3 の座標変化をアームの作業可動域にスケーリング
+            # WebXR: x=右, y=上, z=手前（前方は -z） → ロボット: x=前, y=左, z=上
             delta = (q - self.initial_quest_pos) * SCALE
-            self.target_pos = self._origin_target + np.array([delta[2], -delta[0], delta[1]])
+            self.target_pos = self._origin_target + np.array([-delta[2], -delta[0], delta[1]])
             self.gripper = grip
+            if payload.get("reset_block"):
+                self.block_reset_requested = True
+
+    def pop_block_reset(self):
+        """ブロックのリセット要求を 1 回だけ取り出す"""
+        with self.lock:
+            requested, self.block_reset_requested = self.block_reset_requested, False
+            return requested
 
     def snapshot(self):
         with self.lock:
@@ -144,6 +166,23 @@ def apply_control(model, data, target, gripper):
     data.mocap_pos[model.body("target_site").mocapid[0]] = clamp_target(target)
 
 
+def reset_block(model, data, rng=None):
+    """
+    赤ブロックを keyframe "home" の初期位置に戻す（速度もゼロにする）。
+    rng を渡すと、初期位置を中心に xy 位置と向き（z 軸回り）をランダムにずらす。
+    """
+    joint = model.joint("red_block_joint")
+    qadr, vadr = joint.qposadr[0], joint.dofadr[0]
+    qpos = model.key("home").qpos[qadr:qadr + 7].copy()
+    if rng is not None:
+        qpos[:2] += rng.uniform(-BLOCK_RANDOM_XY, BLOCK_RANDOM_XY, size=2)
+        yaw = rng.uniform(-BLOCK_RANDOM_YAW, BLOCK_RANDOM_YAW)
+        qpos[3:7] = [np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)]
+    data.qpos[qadr:qadr + 7] = qpos
+    data.qvel[vadr:vadr + 6] = 0.0
+    mujoco.mj_forward(model, data)
+
+
 def load_model():
     model = mujoco.MjModel.from_xml_path(str(MODEL_XML))
     data = mujoco.MjData(model)
@@ -156,6 +195,7 @@ class TaskMonitor:
     """Pick & Place の進行状況（持ち上げ・配置成功）を判定してログ出力する"""
 
     LIFT_Z = 0.04
+    REACH_R = 0.24  # 土台からこれより遠くで止まったブロックは掴めないので自動リセット
 
     def __init__(self, model):
         self.block_body = model.body("red_block").id
@@ -175,6 +215,7 @@ class TaskMonitor:
         return False
 
     def update(self, data, verbose=True):
+        """状態を更新し、今回のステップで配置成功になったら True を返す"""
         pos = data.xpos[self.block_body]
         speed = np.linalg.norm(data.cvel[self.block_body][3:])
 
@@ -189,10 +230,21 @@ class TaskMonitor:
             self.placed = True
             if verbose:
                 print(f"[Task] 🎯 配置成功！ブロックが目標エリアに置かれました ({pos[0]:.3f}, {pos[1]:.3f})")
+            return True
 
         if self.placed and not in_area:
             # 再挑戦できるよう状態を戻す
             self.lifted = self.placed = False
+        return False
+
+    def out_of_reach(self, data):
+        """ブロックがアームの届かない場所（または床の外）で止まっているか"""
+        pos = data.xpos[self.block_body]
+        speed = np.linalg.norm(data.cvel[self.block_body][3:])
+        return (np.hypot(pos[0], pos[1]) > self.REACH_R and speed < 0.02) or pos[2] < -0.05
+
+    def reset(self):
+        self.lifted = self.placed = False
 
 
 # ---------------------------------------------------------------------------
@@ -258,8 +310,28 @@ def start_web_server(state, host, port):
 # 物理シミュレーションループ
 # ---------------------------------------------------------------------------
 
+def show_overlay(viewer, success_count, success):
+    """viewer に成功回数と（成功時は）大きなメッセージを重ねて表示する（MuJoCo のフォントは ASCII のみ）"""
+    if viewer is None:
+        return
+    texts = [(mujoco.mjtFontScale.mjFONTSCALE_150, mujoco.mjtGridPos.mjGRID_BOTTOMRIGHT,
+              "Success\nB button", f"{success_count}\nreset block")]
+    if success:
+        texts.append((mujoco.mjtFontScale.mjFONTSCALE_300, mujoco.mjtGridPos.mjGRID_TOP,
+                      "SUCCESS!  Block placed", None))
+    viewer.set_texts(texts)
+
+
 def run_simulation(model, data, state, viewer=None):
     monitor = TaskMonitor(model)
+    rng = np.random.default_rng()
+    area_geom = model.geom("place_area_geom").id
+    area_rgba = model.geom_rgba[area_geom].copy()
+    success_count = 0
+    success_until = None  # 配置成功後、この時刻（perf_counter）になったらブロックを再配置する
+
+    reset_block(model, data, rng)
+    show_overlay(viewer, success_count, success=False)
     wall_start = time.perf_counter()
     sim_start = data.time
 
@@ -280,7 +352,27 @@ def run_simulation(model, data, state, viewer=None):
         else:
             wall_start, sim_start = time.perf_counter(), data.time
 
-        monitor.update(data)
+        if monitor.update(data):
+            success_count += 1
+            success_until = time.perf_counter() + SUCCESS_HOLD_SEC
+            model.geom_rgba[area_geom] = AREA_SUCCESS_RGBA
+            show_overlay(viewer, success_count, success=True)
+
+        reset_reason = None
+        if success_until is not None and time.perf_counter() >= success_until:
+            reset_reason = "配置成功"
+        elif state.pop_block_reset():
+            reset_reason = "B ボタン"
+        elif success_until is None and monitor.out_of_reach(data):
+            reset_reason = "アームの届かない場所に出たため"
+        if reset_reason:
+            print(f"[Task] ブロックを再配置しました（{reset_reason}）")
+            reset_block(model, data, rng)
+            monitor.reset()
+            success_until = None
+            model.geom_rgba[area_geom] = area_rgba
+            show_overlay(viewer, success_count, success=False)
+
         if viewer is not None:
             viewer.sync()
         time.sleep(0.005)
@@ -301,7 +393,9 @@ def main():
     print(" Quest 3 VR テレオペ統合サーバー起動")
     print(f"  Web       : http://localhost:{args.port}/")
     print(f"  WebSocket : ws://localhost:{args.port}/ws")
-    print("  グリップ  : 押し込むとグリッパーが閉じる / A ボタンで原点リセット")
+    print("  グリップ  : 押し込むとグリッパーが閉じる")
+    print("  A ボタン  : 原点リセット / B ボタン : ブロックを再配置")
+    print(f"  配置成功  : 画面にメッセージ表示 → {SUCCESS_HOLD_SEC:.0f} 秒後にブロックをランダムに再配置")
     print("==========================================")
 
     try:
@@ -309,6 +403,11 @@ def main():
             run_simulation(model, data, state)
         else:
             with mujoco.viewer.launch_passive(model, data) as viewer:
+                with viewer.lock():
+                    viewer.cam.lookat[:] = VIEWER_CAMERA["lookat"]
+                    viewer.cam.distance = VIEWER_CAMERA["distance"]
+                    viewer.cam.azimuth = VIEWER_CAMERA["azimuth"]
+                    viewer.cam.elevation = VIEWER_CAMERA["elevation"]
                 run_simulation(model, data, state, viewer)
     except KeyboardInterrupt:
         pass
