@@ -33,6 +33,8 @@ teleop_server.py（ポート 8000）
 | `recorder.py` | エピソード記録（`teleop_server.py --record`）。配置成功で `data/episodes/episode_XXXXXX.hdf5` に保存、B ボタン・切断などで破棄 |
 | `render_episodes.py` | 記録の `sim/qpos` から EGL でカメラ画像（`cam_front` / `cam_wrist`）を描いて `observation/images/*` に追加 |
 | `test_recorder.py` | 記録 → 画像追加のヘッドレス結合テスト（実時間で約 17 秒） |
+| `convert_to_lerobot.py` | 記録を LeRobot 形式（`data/lerobot/so101_pick_place`、画像は PNG）に変換。`~/lerobot_env` で実行 |
+| `eval_policy.py` | 学習した方策を MuJoCo 上で動かし成功率を測る（GIF を `outputs/eval/` に保存）。`~/lerobot_env` で実行 |
 | `teleop_mujoco.py`, `load_so101.py`, `test_mujoco.py`, `vr_server_test.py` | Phase 2 以前の旧ファイル（使っていない） |
 
 ## 検証コマンド
@@ -49,6 +51,18 @@ curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8011/teleop_server.py 
 ```
 
 - オフスクリーン描画は `MUJOCO_GL=egl` + `mujoco.Renderer`（1 プロセスで 1 個を使い回す。終了時の `EGLError` は無視してよい）。
+## 学習（`~/lerobot_env`：LeRobot 0.6.1 + torch CUDA。`~/pai_env` とは numpy の版が合わないので別の venv）
+
+```bash
+~/lerobot_env/bin/python convert_to_lerobot.py --overwrite
+~/lerobot_env/bin/lerobot-train --dataset.repo_id=local/so101_pick_place --dataset.root=data/lerobot/so101_pick_place \
+  --policy.type=act --policy.device=cuda --policy.push_to_hub=false --output_dir=outputs/train/<名前> \
+  --steps=<N> --batch_size=8 --save_freq=5000 --wandb.enable=false --num_workers=12
+~/lerobot_env/bin/python eval_policy.py outputs/train/<名前>/checkpoints/last/pretrained_model --episodes 10
+```
+- 本番の学習の前に、ユーザーへ準備（WSL メモリ・電源・スリープ・冷却など）をリマインドする。
+- 目安（RTX 3080 Ti Laptop）：GPU で約 0.33 秒/ステップ（CPU は約 2.9 秒/ステップ）。チェックポイント 1 個 591MB。
+
 - node は nvm 経由（`source ~/.nvm/nvm.sh`）。PATH には Windows 側の `npx`（`/mnt/c/...`）も入っているので注意。
 
 ## 変更するときの注意（詳細は引継書 §4）
