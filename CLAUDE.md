@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 東大 PAI 応用コース最終課題「Meta Quest 3 + WebXR による VR テレオペ & MuJoCo 上の SO-101 アーム連動環境」。
-やり取りは日本語で行う。最新の状況・次にやることは `reportingMemo/261030-phase4-handover.md`（Phase 4 の引継書 兼 作業記録）、それ以前の経緯・設計判断は `261029-phase3-handover.md`（以下、Phase 3 の引継書）を参照。
+やり取りは日本語で行う。最新の状況・次にやること（締切 11/2 10:00 までの手順）は `reportingMemo/261031-phase5-handover.md`、学習前までの経緯は `261030-phase4-handover.md`（Phase 4 の引継書 兼 作業記録）、それ以前の経緯・設計判断は `261029-phase3-handover.md`（以下、Phase 3 の引継書）を参照。
 
 ## 作業のルール（必ず守る）
 
@@ -34,7 +34,7 @@ teleop_server.py（ポート 8000）
 | `render_episodes.py` | 記録の `sim/qpos` から EGL でカメラ画像（`cam_front` / `cam_wrist`）を描いて `observation/images/*` に追加 |
 | `test_recorder.py` | 記録 → 画像追加のヘッドレス結合テスト（実時間で約 17 秒） |
 | `convert_to_lerobot.py` | 記録を LeRobot 形式（`data/lerobot/so101_pick_place`、画像は PNG）に変換。`~/lerobot_env` で実行 |
-| `eval_policy.py` | 学習した方策を MuJoCo 上で動かし成功率を測る（GIF を `outputs/eval/` に保存）。`~/lerobot_env` で実行 |
+| `eval_policy.py` | 学習した方策を MuJoCo 上で動かし成功率を測る（GIF を `outputs/eval/` に保存）。`~/lerobot_env` で実行。`--offset-cm` / `--yaw-deg` で学習範囲外に置く汎化の確認、結果は `results.json` |
 | `teleop_mujoco.py`, `load_so101.py`, `test_mujoco.py`, `vr_server_test.py` | Phase 2 以前の旧ファイル（使っていない） |
 
 ## 検証コマンド
