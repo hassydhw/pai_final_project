@@ -33,7 +33,11 @@
 
 - 最後に「=== 評価 すべて終了」と表示される。
 - PC の再起動・シャットダウンで止まる。Windows Update は一時停止しておく。
-- 止まっていたら、終わっていない条件だけ `run_generalization.sh` の該当行を手で実行し直す。
+- 止まったら、同じコマンドで再開できる。`results.json` がある条件（終わった条件）は飛ばし、途中だった条件は最初からやり直す。
+  ```bash
+  cd ~/pai_final_project
+  tmux new-session -d -s eval -c ~/pai_final_project "bash outputs/run_generalization.sh; read"
+  ```
 
 ## 3. 再開手順
 
