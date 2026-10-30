@@ -42,6 +42,7 @@
 
         // サーバーから受け取ったシミュレーションの表示（ロボット座標の geom をそのまま子に持つ）
         let robotRoot = null, geomRoot = null, geomObjects = [], successMaterial = null, successBaseColor = null, successColor = null;
+        let recLabel = null;
 
         const startBtn = document.getElementById('startBtn');
         const statusDiv = document.getElementById('status');
@@ -80,6 +81,10 @@
             Object.assign(sun.shadow.camera, { left: -0.6, right: 0.6, top: 0.6, bottom: -0.6, near: 0.5, far: 4 });
             sun.shadow.bias = -0.0005;
             robotRoot.add(sun, sun.target);
+
+            // 記録の状態パネル（--record のときだけ表示）。机の奥の少し上に、操作者の方を向けて置く
+            recLabel = makeRecLabel();
+            robotRoot.add(recLabel);
 
             renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
@@ -168,6 +173,44 @@
         }
 
         // 30 Hz で届く状態（各 geom の位置・姿勢、配置成功中か、表示位置）を反映する
+        // 記録の状態パネル。ロボット座標（robotRoot の子）で、板の右 = 操作者の右（ロボットの -y）、
+        // 上 = ロボットの +z、表 = 操作者の方（ロボットの -x）を向ける
+        function makeRecLabel() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 512;
+            canvas.height = 192;
+            const texture = new THREE.CanvasTexture(canvas);
+            const label = new THREE.Mesh(new THREE.PlaneGeometry(0.16, 0.06),
+                                         new THREE.MeshBasicMaterial({ map: texture, transparent: true }));
+            label.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(
+                new THREE.Vector3(0, -1, 0), new THREE.Vector3(0, 0, 1), new THREE.Vector3(-1, 0, 0)));
+            label.position.set(0.42, 0, 0.18);
+            label.visible = false;
+            label.userData = { canvas, texture, key: null };
+            return label;
+        }
+
+        function updateRecLabel(rec) {
+            recLabel.visible = !!rec;
+            if (!rec) return;
+            const key = `${rec.active}/${rec.saved}/${rec.total}`;
+            if (key === recLabel.userData.key) return;  // 変わったときだけ描き直す
+            recLabel.userData.key = key;
+            const { canvas, texture } = recLabel.userData;
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = 'rgba(17, 24, 39, 0.8)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.textBaseline = 'middle';
+            ctx.font = 'bold 60px sans-serif';
+            ctx.fillStyle = rec.active ? '#ef4444' : '#94a3b8';
+            ctx.fillText(rec.active ? '● REC' : 'Standby', 28, 52);
+            ctx.font = 'bold 52px sans-serif';
+            ctx.fillStyle = '#ffffff';
+            ctx.fillText(`Saved ${rec.saved}  (total ${rec.total})`, 28, 136);
+            texture.needsUpdate = true;
+        }
+
         function applyState(msg) {
             if (!msg.anchor) {
                 robotRoot.visible = false;  // 手の原点が決まるまでは表示しない
@@ -182,6 +225,7 @@
                 obj.quaternion.set(p[4], p[5], p[6], p[3]);  // MuJoCo は (w, x, y, z)
             });
             if (successMaterial) successMaterial.color.copy(msg.success ? successColor : successBaseColor);
+            updateRecLabel(msg.rec);
         }
 
         // WebSocket 接続（切断時は自動で再接続）

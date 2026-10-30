@@ -95,6 +95,7 @@ class TeleopState:
         self.block_reset_requested = False
         self._poses = None
         self._success = False
+        self._rec = None
 
     def reset_origin(self):
         """次に受信した手の位置を新しい原点にする（再接続時）"""
@@ -143,10 +144,10 @@ class TeleopState:
         with self.lock:
             return self.initial_quest_pos is not None
 
-    def publish_scene(self, poses, success):
-        """物理ループから最新の geom の位置・姿勢と配置成功中かどうかを渡す"""
+    def publish_scene(self, poses, success, rec=None):
+        """物理ループから最新の geom の位置・姿勢、配置成功中かどうか、記録の状態（--record のとき）を渡す"""
         with self.lock:
-            self._poses, self._success = poses, success
+            self._poses, self._success, self._rec = poses, success, rec
 
     def scene_state(self):
         """
@@ -162,7 +163,8 @@ class TeleopState:
                 anchor = self.initial_quest_pos - robot_to_xr(self._origin_target) / SCALE
                 anchor[1] = self._table_y
                 anchor = np.round(anchor, 4).tolist()
-            return {"type": "state", "poses": self._poses, "success": self._success, "anchor": anchor}
+            return {"type": "state", "poses": self._poses, "success": self._success, "anchor": anchor,
+                    "rec": self._rec}
 
 
 def clamp_target(target):
@@ -438,7 +440,8 @@ def show_overlay(viewer, success_count, success, recorder=None):
               "Success\nB button", f"{success_count}\nreset block")]
     if recorder is not None:
         texts.append((mujoco.mjtFontScale.mjFONTSCALE_150, mujoco.mjtGridPos.mjGRID_BOTTOMLEFT,
-                      "REC" if recorder.active else "Standby", f"saved {recorder.saved_count}"))
+                      "REC" if recorder.active else "Standby",
+                      f"saved {recorder.saved_count} (total {recorder.next_index})"))
     if success:
         texts.append((mujoco.mjtFontScale.mjFONTSCALE_300, mujoco.mjtGridPos.mjGRID_TOP,
                       "SUCCESS!  Block placed", None))
@@ -508,7 +511,9 @@ def run_simulation(model, data, state, viewer=None, recorder=None):
             show_overlay(viewer, success_count, False, recorder)
 
         # VR 表示用に毎回最新の状態を渡す（送信は WebSocket 側が STATE_HZ で行う）
-        state.publish_scene(scene_poses(data, scene_ids), success_until is not None)
+        rec = None if recorder is None else {"active": recorder.active, "saved": recorder.saved_count,
+                                             "total": recorder.next_index}
+        state.publish_scene(scene_poses(data, scene_ids), success_until is not None, rec)
 
         if viewer is not None:
             viewer.sync()

@@ -32,7 +32,8 @@ import numpy as np
 DATA_DIR = Path(__file__).resolve().parent / "data" / "episodes"
 RECORD_FPS = 30
 MAX_EPISODE_SEC = 120.0
-POST_SUCCESS_SEC = 1.0  # 配置成功のあとも記録を続ける時間（離して手を引く動きを学習データに入れる）
+POST_SUCCESS_SEC = 1.5  # 配置成功のあとも記録を続ける時間（離して手を引く動きを学習データに入れる。
+                        # teleop_server.SUCCESS_HOLD_SEC（ブロック再配置までの時間）より短くする）
 JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4", "finger_left_joint", "finger_right_joint"]
 
 

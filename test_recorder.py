@@ -3,7 +3,7 @@
 
 run_simulation を viewer なしで動かし、Quest 3 の代わりに TeleopState へ手の位置を送って
 test_pick_place.py と同じ手順で Pick & Place する（実時間で約 15 秒）。
-  1. 配置成功 → 1 秒（POST_SUCCESS_SEC）記録を続けてからエピソードが 1 つ保存される
+  1. 配置成功 → POST_SUCCESS_SEC（1.5 秒）記録を続けてからエピソードが 1 つ保存される
   2. 次のエピソード中に B ボタン → 破棄される
   3. 次のエピソード中に切断 → 破棄される
   4. render_episodes.py で画像を追加できる
