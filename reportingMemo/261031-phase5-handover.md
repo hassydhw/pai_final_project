@@ -21,9 +21,10 @@
 - パイロットとの差に「記録方法の変更（成功後 1.5 秒の記録）」も含まれる点は、データ収集仕様が成功率を左右した知見としてレポートに明記する。
 - レポートの比率の目安：テレオペ環境の自作・遅延対策 40%、学習・評価・汎化の結果と考察 60%。
 
-## 2. 実行中のジョブ（tmux セッション `eval`）
+## 2. 実行中のジョブ（systemd のユーザーサービス `pai-eval`）
 
-`outputs/run_generalization.sh` が以下を順に実行する（06:58 開始、9:30 ごろ終了の見込み）。
+`outputs/run_generalization.sh` が以下を順に実行する（07:42 開始、10:00〜10:15 ごろ終了の見込み）。
+tmux で動かしていたら、VS Code を閉じたときに一緒に止まった（07:14）。そのため `loginctl enable-linger hal`（設定済み）+ `systemd-run --user` で、VS Code やターミナルを閉じても止まらない形にしている。
 
 | 順 | 内容 | ログ | GIF・results.json |
 |---|---|---|---|
@@ -33,19 +34,21 @@
 
 - 最後に「=== 評価 すべて終了」と表示される。
 - PC の再起動・シャットダウンで止まる。Windows Update は一時停止しておく。
+- 様子を見る：`systemctl --user status pai-eval`（動いていれば active (running)）、`journalctl --user -u pai-eval`（各条件の開始時刻と成功率）。
 - 止まったら、同じコマンドで再開できる。`results.json` がある条件（終わった条件）は飛ばし、途中だった条件は最初からやり直す。
   ```bash
   cd ~/pai_final_project
-  tmux new-session -d -s eval -c ~/pai_final_project "bash outputs/run_generalization.sh; read"
+  systemd-run --user --unit=pai-eval --working-directory=$HOME/pai_final_project /bin/bash outputs/run_generalization.sh
   ```
+  （前回のユニットが failed で残っていて起動できないときは、先に `systemctl --user reset-failed pai-eval`）
 
 ## 3. 再開手順
 
 1. VS Code で WSL の `~/pai_final_project` を開き、Claude Code パネル上部の Session history からこのセッションを再開する。CLI なら `claude --resume`。
 2. ジョブの状況を確認する。
    ```bash
-   tmux ls                       # eval が残っていれば実行中か、終了表示で待機中
-   tmux attach -t eval           # 様子を見る（Ctrl+B D で抜ける）
+   systemctl --user status pai-eval   # active (running) なら実行中、inactive なら終了
+   journalctl --user -u pai-eval      # 各条件の開始時刻と成功率
    tail -3 outputs/eval_*.log    # 各条件の「成功率: x/y」
    ```
 3. Claude に「handover の続きから」と伝える。

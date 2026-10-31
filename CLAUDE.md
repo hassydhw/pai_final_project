@@ -5,6 +5,8 @@
 
 ## 作業のルール（必ず守る）
 
+- **報告・説明・途中経過のメッセージは、すべて日本語で書く。**（英語で書かない）
+
 - **git のコミットはユーザーが VS Code から手動で行う。** 頼まれない限り `git add` / `git commit` をしない。
 - git は **WSL 側の git**（`/usr/bin/git`）を使う。Windows 版 git は dubious ownership になり、実行ビットも落ちる。
 - 改行は **LF**（`.gitattributes` で `* text=auto eol=lf`。WSL の git は `core.autocrlf=true` なので CRLF に注意）。
