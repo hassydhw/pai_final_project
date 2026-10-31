@@ -15,6 +15,10 @@
 
 中間報告（先生との相談用）は Claude Docs：https://claude.ai/artifact/6bvwQNyXgUuaCoNfTQy1kS
 
+- **注意：成功後の記録は 36 回中 33 回が 1.0 秒、最後の 3 回だけ 1.5 秒**（`POST_SUCCESS_SEC` を 1.5 にしたのは収集の途中、`46031a2`）。レポート・動画では「約 1 秒」と書く。
+- 最終レポートの下書き（Claude Docs）：https://claude.ai/artifact/EReHtVjPthL4aX2StDRWX6 。アカウント名と YouTube の URL が未記入。
+- デモ動画は `pai-final-video/`（Remotion、git 管理外。使い方は同フォルダの README）。`out/pai-final-demo.mp4`（2 分 14 秒）。Quest 3 の録画（10/31 19:23、adb で取り出し、32〜56 秒を使用）と、同じ時刻の PC の MuJoCo 画面の録画を左右に並べて組み込み済み。
+
 ### 先生との相談結果
 - Quest 3（WebXR）の自作テレオペ環境が高評価。
 - 追加実験は **汎化の確認（案 E）** を行う。

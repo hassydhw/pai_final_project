@@ -50,3 +50,6 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+
+# ===== デモ動画（Remotion、git 管理しない） =====
+pai-final-video/
