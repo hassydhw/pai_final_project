@@ -4,3 +4,4 @@ aiohttp>=3.9
 h5py        # recorder.py（エピソード記録）
 pillow      # render_episodes.py --preview
 websockets  # send_test.py / 旧 teleop_mujoco.py 用
+matplotlib  # make_figures.py（評価結果のグラフ）
